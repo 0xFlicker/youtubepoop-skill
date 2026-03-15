@@ -21,7 +21,7 @@ HEIGHT = 720
 FPS = 24
 
 # Music — pre-generated blues rock track (120s total, 9s dead space at end)
-music_path = str(Path(__file__).parent.parent.parent / "claw_together.mp3")
+music_path = str(Path(__file__).parent / "build/assets/claw_together.mp3")
 music_volume = 0.45
 
 # TTS placed at exact timestamps using positional mode.

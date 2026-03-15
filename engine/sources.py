@@ -336,3 +336,325 @@ def gen_heartbeat_monitor(t, width=1280, height=720, bpm=72, color=(0, 255, 0)):
     draw.text((width - 200, 30), f"BPM: {bpm}", fill=color, font=font)
 
     return img
+
+
+# ── Organic / Chaotic generative sources ────────────────────────────────────
+
+# --- Reaction-Diffusion ---
+
+class _RDState:
+    """Gray-Scott reaction-diffusion simulation state."""
+
+    def __init__(self, w, h, feed_rate, kill_rate):
+        self.U = np.ones((h, w), dtype=np.float64)
+        self.V = np.zeros((h, w), dtype=np.float64)
+        # Seed a small square of V at center
+        ch, cw = h // 2, w // 2
+        s = max(2, min(w, h) // 10)
+        self.V[ch - s:ch + s, cw - s:cw + s] = 0.5 + 0.1 * np.random.random((2 * s, 2 * s))
+
+_rd_cache = {}
+
+def _rd_laplacian(grid):
+    """Compute Laplacian via np.roll (periodic boundaries)."""
+    return (np.roll(grid, 1, axis=0) + np.roll(grid, -1, axis=0)
+            + np.roll(grid, 1, axis=1) + np.roll(grid, -1, axis=1)
+            - 4.0 * grid)
+
+def gen_reaction_diffusion(t, width=1280, height=720, feed_rate=0.04,
+                           kill_rate=0.06, palette="alien", speed=10,
+                           sim_scale=4):
+    """Gray-Scott reaction-diffusion — organic evolving spots, stripes, coral."""
+    sim_w = width // sim_scale
+    sim_h = height // sim_scale
+    cache_key = (sim_w, sim_h, feed_rate, kill_rate)
+
+    if cache_key not in _rd_cache:
+        _rd_cache[cache_key] = _RDState(sim_w, sim_h, feed_rate, kill_rate)
+    state = _rd_cache[cache_key]
+
+    Du, Dv = 0.16, 0.08
+    dt = 1.0
+    F, k = feed_rate, kill_rate
+
+    for _ in range(speed):
+        lu = _rd_laplacian(state.U)
+        lv = _rd_laplacian(state.V)
+        uvv = state.U * state.V * state.V
+        state.U += dt * (Du * lu - uvv + F * (1.0 - state.U))
+        state.V += dt * (Dv * lv + uvv - (F + k) * state.V)
+        state.U = np.clip(state.U, 0, 1)
+        state.V = np.clip(state.V, 0, 1)
+
+    v = state.V
+    arr = np.zeros((sim_h, sim_w, 3), dtype=np.uint8)
+
+    if palette == "alien":
+        arr[:, :, 0] = (v * 50).astype(np.uint8)
+        arr[:, :, 1] = (v * 255).astype(np.uint8)
+        arr[:, :, 2] = (v * 200).astype(np.uint8)
+    elif palette == "coral":
+        arr[:, :, 0] = (v * 255).astype(np.uint8)
+        arr[:, :, 1] = (v * 120).astype(np.uint8)
+        arr[:, :, 2] = (v * 80).astype(np.uint8)
+    elif palette == "void":
+        arr[:, :, 0] = (v * 130).astype(np.uint8)
+        arr[:, :, 1] = (v * 50).astype(np.uint8)
+        arr[:, :, 2] = (v * 255).astype(np.uint8)
+    elif palette == "electric":
+        arr[:, :, 0] = (v * 255).astype(np.uint8)
+        arr[:, :, 1] = (v * 80).astype(np.uint8)
+        arr[:, :, 2] = (v * 255).astype(np.uint8)
+    else:  # grayscale fallback
+        g = (v * 255).astype(np.uint8)
+        arr[:, :, 0] = g
+        arr[:, :, 1] = g
+        arr[:, :, 2] = g
+
+    img = Image.fromarray(arr)
+    if sim_scale != 1:
+        img = img.resize((width, height), Image.LANCZOS)
+    return img
+
+
+# --- Strange Attractor ---
+
+class _AttractorState:
+    """Particle state for strange attractor rendering."""
+
+    def __init__(self, n_points, attractor_type, width, height):
+        self.width = width
+        self.height = height
+        self.attractor_type = attractor_type
+        # Initialize particles near attractor center
+        if attractor_type == "rossler":
+            self.points = np.random.randn(n_points, 3) * 0.5
+        elif attractor_type == "aizawa":
+            self.points = np.random.randn(n_points, 3) * 0.1
+        else:  # lorenz
+            self.points = np.random.randn(n_points, 3) * 0.5
+            self.points[:, 2] += 25  # near Lorenz center
+        self.trail = np.zeros((height, width), dtype=np.float64)
+
+_attractor_cache = {}
+
+def _attractor_derivatives(pts, atype):
+    """Compute dx/dt, dy/dt, dz/dt for all particles simultaneously."""
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    if atype == "lorenz":
+        sigma, rho, beta = 10.0, 28.0, 8.0 / 3.0
+        dx = sigma * (y - x)
+        dy = x * (rho - z) - y
+        dz = x * y - beta * z
+    elif atype == "rossler":
+        a, b, c = 0.2, 0.2, 5.7
+        dx = -y - z
+        dy = x + a * y
+        dz = b + z * (x - c)
+    elif atype == "aizawa":
+        a, b, c, d, e, f = 0.95, 0.7, 0.6, 3.5, 0.25, 0.1
+        dx = (z - b) * x - d * y
+        dy = d * x + (z - b) * y
+        dz = c + a * z - z ** 3 / 3.0 - (x ** 2 + y ** 2) * (1 + e * z) + f * z * x ** 3
+    else:
+        dx = dy = dz = np.zeros_like(x)
+    return np.column_stack([dx, dy, dz])
+
+def gen_strange_attractor(t, width=1280, height=720, attractor_type="lorenz",
+                          n_points=2000, rotation_speed=0.3, color_scheme="default",
+                          trail_decay=0.95):
+    """Render chaotic strange attractors as luminous particle traces."""
+    cache_key = (attractor_type, n_points, width, height)
+
+    if cache_key not in _attractor_cache:
+        _attractor_cache[cache_key] = _AttractorState(n_points, attractor_type, width, height)
+    state = _attractor_cache[cache_key]
+
+    # Integration substeps
+    dt = 0.005
+    for _ in range(10):
+        deriv = _attractor_derivatives(state.points, attractor_type)
+        state.points += deriv * dt
+
+    # Reset escaped particles
+    norms = np.linalg.norm(state.points, axis=1)
+    escaped = norms > 200
+    if np.any(escaped):
+        n_esc = escaped.sum()
+        if attractor_type == "lorenz":
+            state.points[escaped] = np.random.randn(n_esc, 3) * 0.5
+            state.points[escaped, 2] += 25
+        else:
+            state.points[escaped] = np.random.randn(n_esc, 3) * 0.5
+
+    # 3D rotation around Y axis
+    angle = rotation_speed * t
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    x_rot = state.points[:, 0] * cos_a + state.points[:, 2] * sin_a
+    y_rot = state.points[:, 1]
+    z_rot = -state.points[:, 0] * sin_a + state.points[:, 2] * cos_a
+
+    # Perspective projection
+    fov = 400.0
+    z_offset = 60.0
+    denom = z_rot + z_offset
+    denom = np.where(np.abs(denom) < 1.0, 1.0, denom)
+    sx = (x_rot * fov / denom + width / 2).astype(np.int32)
+    sy = (y_rot * fov / denom + height / 2).astype(np.int32)
+
+    # Decay trail
+    state.trail *= trail_decay
+
+    # Plot points on trail
+    valid = (sx >= 0) & (sx < width) & (sy >= 0) & (sy < height)
+    state.trail[sy[valid], sx[valid]] = 1.0
+
+    # Colorize
+    trail = np.clip(state.trail, 0, 1)
+    arr = np.zeros((height, width, 3), dtype=np.uint8)
+
+    if color_scheme == "fire":
+        arr[:, :, 0] = (trail * 255).astype(np.uint8)
+        arr[:, :, 1] = (trail ** 2 * 180).astype(np.uint8)
+        arr[:, :, 2] = (trail ** 3 * 80).astype(np.uint8)
+    elif color_scheme == "neon":
+        hue_shift = t * 0.2
+        arr[:, :, 0] = (trail * 255 * (0.5 + 0.5 * math.sin(hue_shift))).astype(np.uint8)
+        arr[:, :, 1] = (trail * 255 * (0.5 + 0.5 * math.sin(hue_shift + 2.1))).astype(np.uint8)
+        arr[:, :, 2] = (trail * 255 * (0.5 + 0.5 * math.sin(hue_shift + 4.2))).astype(np.uint8)
+    elif color_scheme == "ice":
+        arr[:, :, 0] = (trail ** 3 * 150).astype(np.uint8)
+        arr[:, :, 1] = (trail * 230).astype(np.uint8)
+        arr[:, :, 2] = (trail * 255).astype(np.uint8)
+    else:  # default — white/blue
+        arr[:, :, 0] = (trail * 180).astype(np.uint8)
+        arr[:, :, 1] = (trail * 200).astype(np.uint8)
+        arr[:, :, 2] = (trail * 255).astype(np.uint8)
+
+    return Image.fromarray(arr)
+
+
+# --- ASCII Matrix ---
+
+_ascii_tile_cache = {}
+_ascii_rain_state = {}
+
+def gen_ascii_matrix(t, width=1280, height=720, mode="rain", char_size=14,
+                     color="green", density=0.6, speed=1.0):
+    """ASCII art renderer — digital rain, static noise, or morphing sine fields."""
+    chars = ' .:-=+*#%@'
+    n_chars = len(chars)
+
+    cols = width // max(4, char_size)
+    rows = height // max(4, char_size)
+
+    # Pre-render character tiles
+    cache_key = (char_size, color)
+    if cache_key not in _ascii_tile_cache:
+        color_map = {
+            "green": (0, 255, 65),
+            "amber": (255, 176, 0),
+            "white": (220, 220, 220),
+        }
+        base_color = color_map.get(color, (0, 255, 65))
+        tiles = {}
+        for ch in chars:
+            tile = Image.new("RGB", (char_size, char_size), (0, 0, 0))
+            d = ImageDraw.Draw(tile)
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                    max(6, char_size - 2))
+            except Exception:
+                font = ImageFont.load_default()
+            d.text((1, 0), ch, fill=base_color, font=font)
+            tiles[ch] = tile
+        _ascii_tile_cache[cache_key] = tiles
+
+    tiles = _ascii_tile_cache[cache_key]
+
+    # Build character grid
+    grid = [[' '] * cols for _ in range(rows)]
+
+    if mode == "rain":
+        rain_key = (cols, rows, color)
+        if rain_key not in _ascii_rain_state:
+            # Initialize column drop positions and speeds
+            _ascii_rain_state[rain_key] = {
+                'heads': [random.randint(-rows, 0) for _ in range(cols)],
+                'speeds': [random.uniform(0.3, 1.5) for _ in range(cols)],
+                'last_t': t,
+            }
+        rs = _ascii_rain_state[rain_key]
+        dt = (t - rs['last_t']) * speed * 10
+        rs['last_t'] = t
+
+        for c in range(cols):
+            rs['heads'][c] += rs['speeds'][c] * dt
+            head = int(rs['heads'][c])
+            # Reset column when fully off screen
+            if head - rows > rows:
+                rs['heads'][c] = random.randint(-rows, -1)
+                rs['speeds'][c] = random.uniform(0.3, 1.5)
+                head = int(rs['heads'][c])
+            trail_len = int(rows * density)
+            for r in range(rows):
+                dist = head - r
+                if 0 <= dist < trail_len:
+                    brightness = 1.0 - dist / trail_len
+                    char_idx = min(n_chars - 1, int(brightness * (n_chars - 1)))
+                    if random.random() < 0.1:
+                        char_idx = random.randint(0, n_chars - 1)
+                    grid[r][c] = chars[char_idx]
+
+    elif mode == "static":
+        for r in range(rows):
+            for c in range(cols):
+                v = (math.sin(r * 0.3 + t * 2) * math.sin(c * 0.4 + t * 1.5)
+                     + math.sin((r + c) * 0.2 + t * 3)) / 2.0
+                v = (v + 1) / 2
+                char_idx = int(v * (n_chars - 1))
+                grid[r][c] = chars[max(0, min(n_chars - 1, char_idx))]
+
+    elif mode == "morph":
+        for r in range(rows):
+            for c in range(cols):
+                v = (math.sin(r * 0.15 + t * 1.5) * math.cos(c * 0.2 + t * 2.0)
+                     + math.sin(math.sqrt(r * r + c * c) * 0.1 + t * 2.5)) / 2.0
+                v = (v + 1) / 2
+                char_idx = int(v * (n_chars - 1))
+                grid[r][c] = chars[max(0, min(n_chars - 1, char_idx))]
+
+    # Render grid to image using cached tiles
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+
+    if color == "rainbow":
+        # Rainbow: render per-column with hue-shifted tiles
+        for r in range(rows):
+            for c in range(cols):
+                ch = grid[r][c]
+                if ch == ' ':
+                    continue
+                hue = (c / cols + t * 0.1) % 1.0
+                rc, gc, bc = colorsys.hsv_to_rgb(hue, 0.9, 0.9)
+                tile = Image.new("RGB", (char_size, char_size), (0, 0, 0))
+                d = ImageDraw.Draw(tile)
+                try:
+                    font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                        max(6, char_size - 2))
+                except Exception:
+                    font = ImageFont.load_default()
+                d.text((1, 0), ch, fill=(int(rc * 255), int(gc * 255), int(bc * 255)),
+                       font=font)
+                img.paste(tile, (c * char_size, r * char_size))
+    else:
+        # Paste pre-rendered tiles at grid positions
+        for r in range(rows):
+            for c in range(cols):
+                ch = grid[r][c]
+                if ch == ' ':
+                    continue
+                img.paste(tiles[ch], (c * char_size, r * char_size))
+
+    return img

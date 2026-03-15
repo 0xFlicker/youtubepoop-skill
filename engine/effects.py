@@ -1,5 +1,6 @@
 """Visual effects and transitions for YTP-style video generation."""
 
+import io
 import math
 import random
 
@@ -244,6 +245,84 @@ def effect_thermal(img):
     result[:, :, 1] = np.clip((norm - 0.33) * 3 * 255, 0, 255)  # G mid
     result[:, :, 2] = np.clip((0.66 - norm) * 3 * 255, 0, 255)  # B falls
     return Image.fromarray(result.astype(np.uint8))
+
+
+def effect_jpeg_corrupt(img, quality=2, passes=3):
+    """Repeatedly JPEG-compress at ultra-low quality for authentic deep-fry artifacts."""
+    quality = max(1, min(20, quality))
+    passes = max(1, min(5, passes))
+    img = img.convert("RGB")
+    for _ in range(passes):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        buf.seek(0)
+        img = Image.open(buf).copy()
+    return img
+
+
+def effect_slit_scan(img, history=None, band_height=4, direction="horizontal"):
+    """Temporal slit-scan — each band of pixels comes from a different history frame."""
+    if not history:
+        return img
+    w, h = img.size
+    n_history = len(history)
+    result = np.array(img).copy()
+
+    if direction == "horizontal":
+        n_bands = h // max(1, band_height)
+        for i in range(n_bands):
+            hist_idx = int(i * n_history / n_bands) % n_history
+            y0 = i * band_height
+            y1 = min(h, y0 + band_height)
+            src = history[hist_idx]
+            if src.size != img.size:
+                continue
+            src_arr = np.array(src)
+            result[y0:y1, :] = src_arr[y0:y1, :]
+    else:
+        band_width = band_height  # reuse parameter for vertical bands
+        n_bands = w // max(1, band_width)
+        for i in range(n_bands):
+            hist_idx = int(i * n_history / n_bands) % n_history
+            x0 = i * band_width
+            x1 = min(w, x0 + band_width)
+            src = history[hist_idx]
+            if src.size != img.size:
+                continue
+            src_arr = np.array(src)
+            result[:, x0:x1] = src_arr[:, x0:x1]
+
+    return Image.fromarray(result)
+
+
+def effect_displacement_map(img, intensity=15.0, frequency=0.02, t=0.0, axis="both"):
+    """Displace pixels using multi-octave sine noise for liquify/melting distortion."""
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w]
+    xx_f = xx.astype(np.float64)
+    yy_f = yy.astype(np.float64)
+    phase = t * 6.0
+
+    # 3 octaves of 2D sine waves with incommensurate frequencies
+    dx = (0.5 * np.sin(xx_f * frequency + yy_f * frequency * 0.7 + phase)
+          + 0.3 * np.sin(xx_f * frequency * 2.1 + yy_f * frequency * 1.9 + phase * 1.3)
+          + 0.2 * np.sin(xx_f * frequency * 4.3 + yy_f * frequency * 3.7 + phase * 0.7))
+
+    dy = (0.5 * np.sin(xx_f * frequency * 0.8 + yy_f * frequency * 1.1 + phase + 1.5)
+          + 0.3 * np.sin(xx_f * frequency * 1.7 + yy_f * frequency * 2.3 + phase * 1.1 + 2.3)
+          + 0.2 * np.sin(xx_f * frequency * 3.9 + yy_f * frequency * 4.1 + phase * 0.9 + 4.1))
+
+    if axis == "x":
+        dy = 0
+    elif axis == "y":
+        dx = 0
+
+    src_x = np.clip((xx_f + dx * intensity).astype(np.int32), 0, w - 1)
+    src_y = np.clip((yy_f + dy * intensity).astype(np.int32), 0, h - 1)
+
+    result = arr[src_y, src_x]
+    return Image.fromarray(result)
 
 
 # ── Transitions ─────────────────────────────────────────────────────────────
