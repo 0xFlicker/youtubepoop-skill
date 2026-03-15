@@ -38,30 +38,39 @@ def fetch_giphy_gifs(searches, assets_dir, api_key, progress, step_key="giphy"):
 
 
 def generate_dalle_images(prompts, assets_dir, api_key, progress, step_key="dalle"):
-    """Generate images with DALL-E. Skips existing images."""
-    from openai import OpenAI
+    """Generate images with Grok Imagine (xAI). Skips existing images."""
+    import base64
     assets_dir = Path(assets_dir)
 
     if progress.is_done(step_key):
-        print(f"  [cached] DALL-E images")
+        print(f"  [cached] Grok Imagine images")
         return sorted(assets_dir.glob("dalle_*.png"))
-
-    client = OpenAI(api_key=api_key)
 
     for i, prompt in enumerate(prompts):
         path = assets_dir / f"dalle_{i}.png"
         if path.exists():
-            print(f"  [cached] DALL-E image {i+1}/{len(prompts)}")
+            print(f"  [cached] Grok Imagine image {i+1}/{len(prompts)}")
             continue
 
-        print(f"  Generating DALL-E image {i+1}/{len(prompts)}...")
+        print(f"  Generating Grok Imagine image {i+1}/{len(prompts)}...")
         try:
-            response = client.images.generate(
-                model="dall-e-3", prompt=prompt,
-                size="1024x1024", quality="standard", n=1,
+            r = requests.post(
+                "https://api.x.ai/v1/images/generations",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-imagine-image",
+                    "prompt": prompt,
+                    "n": 1,
+                    "aspect_ratio": "1:1",
+                    "response_format": "b64_json",
+                },
             )
-            img_data = requests.get(response.data[0].url).content
-            path.write_bytes(img_data)
+            r.raise_for_status()
+            b64_data = r.json()["data"][0]["b64_json"]
+            path.write_bytes(base64.b64decode(b64_data))
         except Exception as e:
             print(f"    Warning: {e}")
             img = Image.new("RGB", (1024, 1024),

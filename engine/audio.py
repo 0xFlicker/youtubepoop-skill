@@ -366,7 +366,9 @@ def generate_sfx(cues, audio_dir, progress, step_key="sfx"):
 
 def build_audio(tts_clips, total_duration, audio_dir, progress,
                 music_track=None, sfx_timeline=None,
-                tts_effects=None, step_key="audio"):
+                tts_effects=None, step_key="audio",
+                music_gap=None, tts_positions=None,
+                music_start_offset=0.0):
     """
     Assemble final audio track.
 
@@ -389,7 +391,8 @@ def build_audio(tts_clips, total_duration, audio_dir, progress,
             "normal", "chorus", "slow", "normal", "stutter", "normal",
         ]
 
-    processed_clips = []
+    processed_clips = []   # sequential mode: ordered list for concat
+    positional_clips = {}  # positional mode: {clip_index: proc_path}
 
     for i, (clip_path, text) in enumerate(tts_clips):
         if not clip_path.exists():
@@ -436,30 +439,45 @@ def build_audio(tts_clips, total_duration, audio_dir, progress,
             ], capture_output=True)
 
         if out_path.exists():
-            processed_clips.append(out_path)
+            if tts_positions is not None:
+                # Positional mode: track by index, no gaps needed
+                positional_clips[i] = out_path
+            else:
+                processed_clips.append(out_path)
 
-            # Gaps between clips
-            gap_path = audio_dir / f"gap_{i}.wav"
-            if not gap_path.exists() and i % 2 == 0:
-                gap_dur = 0.15 + (i % 3) * 0.1
-                if i % 4 == 0:
-                    subprocess.run([
-                        "ffmpeg", "-y", "-f", "lavfi", "-i",
-                        f"anoisesrc=d={gap_dur}:c=pink:a=0.02",
-                        "-ar", "44100", "-ac", "2", str(gap_path)
-                    ], capture_output=True)
-                else:
-                    subprocess.run([
-                        "ffmpeg", "-y", "-f", "lavfi", "-i",
-                        "anullsrc=r=44100:cl=stereo",
-                        "-t", str(gap_dur), str(gap_path)
-                    ], capture_output=True)
-            if gap_path.exists():
-                processed_clips.append(gap_path)
+                # Gaps between clips — much larger when music is driving the track
+                gap_path = audio_dir / f"gap_{i}.wav"
+                if not gap_path.exists():
+                    if music_gap is not None:
+                        # With music: spread TTS out so the song has breathing room
+                        import random as _random
+                        gap_dur = music_gap + _random.uniform(-0.3, 0.8)
+                        gap_dur = max(0.5, gap_dur)
+                        subprocess.run([
+                            "ffmpeg", "-y", "-f", "lavfi", "-i",
+                            "anullsrc=r=44100:cl=stereo",
+                            "-t", str(gap_dur), str(gap_path)
+                        ], capture_output=True)
+                    elif i % 2 == 0:
+                        gap_dur = 0.15 + (i % 3) * 0.1
+                        if i % 4 == 0:
+                            subprocess.run([
+                                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                                f"anoisesrc=d={gap_dur}:c=pink:a=0.02",
+                                "-ar", "44100", "-ac", "2", str(gap_path)
+                            ], capture_output=True)
+                        else:
+                            subprocess.run([
+                                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                                "anullsrc=r=44100:cl=stereo",
+                                "-t", str(gap_dur), str(gap_path)
+                            ], capture_output=True)
+                if gap_path.exists():
+                    processed_clips.append(gap_path)
 
-    # Concat TTS clips
+    # Concat TTS clips (sequential mode only)
     raw_audio = audio_dir / "raw_combined.wav"
-    if processed_clips:
+    if tts_positions is None and processed_clips:
         parts_file = audio_dir / "parts.txt"
         with open(parts_file, "w") as f:
             for clip in processed_clips:
@@ -475,7 +493,21 @@ def build_audio(tts_clips, total_duration, audio_dir, progress,
     input_idx = 0
     mix_inputs = []
 
-    if raw_audio.exists():
+    if tts_positions is not None:
+        # Positional mode: each TTS clip gets its own adelay-placed input
+        for clip_idx in sorted(positional_clips):
+            proc_path = positional_clips[clip_idx]
+            pos_secs = tts_positions.get(clip_idx, 0.0)
+            delay_ms = int(pos_secs * 1000)
+            label = f"speech{clip_idx}"
+            inputs += ["-i", str(proc_path)]
+            filter_parts.append(
+                f"[{input_idx}:a]adelay={delay_ms}|{delay_ms},"
+                f"apad=whole_dur={total_duration}[{label}]"
+            )
+            input_idx += 1
+            mix_inputs.append(f"[{label}]")
+    elif raw_audio.exists():
         inputs += ["-i", str(raw_audio)]
         filter_parts.append(
             f"[{input_idx}:a]apad=whole_dur={total_duration},"
@@ -486,10 +518,17 @@ def build_audio(tts_clips, total_duration, audio_dir, progress,
 
     if music_track and Path(music_track).exists():
         inputs += ["-i", str(music_track)]
-        filter_parts.append(
-            f"[{input_idx}:a]atrim=0:{total_duration},"
-            f"apad=whole_dur={total_duration}[music]"
-        )
+        if music_start_offset > 0:
+            delay_ms = int(music_start_offset * 1000)
+            filter_parts.append(
+                f"[{input_idx}:a]adelay={delay_ms}|{delay_ms},"
+                f"apad=whole_dur={total_duration}[music]"
+            )
+        else:
+            filter_parts.append(
+                f"[{input_idx}:a]atrim=0:{total_duration},"
+                f"apad=whole_dur={total_duration}[music]"
+            )
         input_idx += 1
         mix_inputs.append("[music]")
 

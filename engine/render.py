@@ -8,10 +8,20 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-def load_and_resize(path, size=(1280, 720)):
-    """Load image/gif frame and resize to target dimensions."""
+def load_and_resize(path, size=(1280, 720), frame=None):
+    """Load image/gif frame and resize to target dimensions.
+
+    For animated GIFs, pass frame= to select which animation frame to use.
+    If frame is None, the first frame is returned (original behavior).
+    """
     try:
-        img = Image.open(path).convert("RGB")
+        img = Image.open(path)
+        # Seek to the requested animation frame for GIFs
+        if frame is not None:
+            n_frames = getattr(img, 'n_frames', 1)
+            if n_frames > 1:
+                img.seek(frame % n_frames)
+        img = img.convert("RGB")
         src_ratio = img.width / img.height
         dst_ratio = size[0] / size[1]
         if src_ratio > dst_ratio:
