@@ -38,12 +38,94 @@ Create a new session. Write `sessions/<session_name>/content.py` with:
 - `music_config` — `{"layers": [...], "master_filters": "...", "mix_volume": 0.3}`
   - Layer types: `sine`, `sawtooth`, `square` (need `freq`), `noise` (needs `color`: pink/white/brown)
   - Each layer: `{"type", "freq", "duration", "volume", "filters"}`
+  - **OR** `ace_music` — ACE-Step music generation config (see Music Generation below)
 - `sfx_cues` — list of `{"name", "type": "tone"|"noise_burst"|"sweep", "freq", "duration", "filters"}`
 - `build_scenes(dalle_images, giphy_gifs)` — returns `(scenes, sfx_timeline)` or just `scenes`
   - Scene: `(name, duration_secs, gen_func)` where `gen_func(frame_num, total_frames) -> PIL.Image`
   - SFX timeline: `[(timestamp_secs, sfx_name), ...]`
 
 Import effects/text/render from the engine. Use `$ARGUMENTS` for the session name and theme.
+
+## Music Generation (ACE-Step 1.5)
+
+When a session needs a real song (not just procedural synth), use the ACE-Step 1.5 model via ComfyUI at `http://172.20.0.1:8000`.
+
+### When to use
+- The content calls for an actual song with lyrics, melody, or specific genre
+- Procedural sine/sawtooth/noise layers won't cut it for the vibe
+- The user requests a song or music track
+
+### content.py config
+Add an `ace_music` dict to the session's `content.py`:
+
+```python
+ace_music = {
+    "tags": "dark synthwave with distorted bassline, arpeggiating synths, cinematic pads, 808 drums",
+    "lyrics": "[Verse 1]\nLines here\n[Chorus]\nChorus lines",
+    "key": "D minor",
+    "bpm": 128,
+    "duration": 70,  # seconds — request ~8s MORE than you need (see Tail Padding below)
+    "seed": 42,
+    "filename": "session_music",  # output filename prefix (no extension)
+}
+```
+
+### Tail Padding
+ACE-Step produces audio exactly the requested length, but the **last 7–9 seconds are typically silent/blank**. Handle this one of three ways:
+1. **Trim**: Request `desired_duration + 8` seconds, then trim the silent tail with ffmpeg: `ffmpeg -i song.mp3 -t <desired_duration> -c copy trimmed.mp3`
+2. **Fill**: Use the silent tail for TTS lines, SFX hits, or a fade-out transition
+3. **Ignore**: If the video is shorter than the music, `-shortest` in the final encode handles it
+
+**Default approach: Trim.** Request 8s extra, trim to desired length after download.
+
+### Generation workflow
+1. **Start music generation early** — submit the ComfyUI prompt as the first step (it takes 1–3 minutes)
+2. **Work on other assets in parallel** — fetch GIPHY, generate DALL-E images, write TTS while music generates
+3. **Poll for completion** before frame rendering begins (music duration determines video timing)
+4. **Download and trim** the result to the session's `build/audio/` directory
+
+### ComfyUI submission
+POST to `http://172.20.0.1:8000/prompt` with this node graph:
+
+```json
+{
+  "prompt": {
+    "104": { "class_type": "UNETLoader", "inputs": { "unet_name": "acestep_v1.5_turbo.safetensors", "weight_dtype": "default" } },
+    "105": { "class_type": "DualCLIPLoader", "inputs": { "clip_name1": "qwen_0.6b_ace15.safetensors", "clip_name2": "qwen_1.7b_ace15.safetensors", "type": "ace", "device": "default" } },
+    "98":  { "class_type": "EmptyAceStep1.5LatentAudio", "inputs": { "seconds": DURATION, "batch_size": 1 } },
+    "94":  { "class_type": "TextEncodeAceStepAudio1.5", "inputs": {
+               "clip": ["105", 0], "tags": "TAGS", "lyrics": "LYRICS",
+               "seed": SEED, "bpm": BPM, "duration": DURATION,
+               "timesignature": "4", "language": "en", "keyscale": "KEY",
+               "generate_audio_codes": true, "cfg_scale": 3,
+               "temperature": 0.8, "top_p": 0.9, "top_k": 0, "min_p": 0 } },
+    "47":  { "class_type": "ConditioningZeroOut", "inputs": { "conditioning": ["94", 0] } },
+    "78":  { "class_type": "ModelSamplingAuraFlow", "inputs": { "model": ["104", 0], "shift": 5 } },
+    "3":   { "class_type": "KSampler", "inputs": {
+               "model": ["78", 0], "positive": ["94", 0], "negative": ["47", 0],
+               "latent_image": ["98", 0], "seed": SEED,
+               "steps": 8, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1 } },
+    "18":  { "class_type": "VAEDecodeAudio", "inputs": { "samples": ["3", 0], "vae": ["106", 0] } },
+    "106": { "class_type": "VAELoader", "inputs": { "vae_name": "ace_1.5_vae.safetensors" } },
+    "107": { "class_type": "SaveAudioMP3", "inputs": {
+               "audio": ["18", 0], "filename_prefix": "audio/FILENAME", "quality": "V0" } }
+  }
+}
+```
+
+### Polling and download
+```bash
+# Poll every 5s until .status.status_str == "success" (timeout 5 min)
+curl -s "http://172.20.0.1:8000/history/{prompt_id}"
+
+# Extract filename from .outputs["107"].audio[0]
+# Download and trim:
+curl -s "http://172.20.0.1:8000/view?filename=FILENAME&type=output&subfolder=SUBFOLDER" -o build/audio/raw_music.mp3
+ffmpeg -y -i build/audio/raw_music.mp3 -t DESIRED_DURATION -c copy build/audio/music.mp3
+```
+
+### Mixing with other audio
+The downloaded music file replaces or supplements the procedural `music_config`. In `generate.py`, the audio mixing step should use this file as the music bed. Layer TTS and SFX on top as usual.
 
 ### `/ytp render [session_name]`
 Run `python generate.py <session_name>` to render. The pipeline is fully resumable — cached steps are skipped.
