@@ -164,12 +164,17 @@ def encode_video(frames_dir, audio_path, output_path, fps):
         cmd += ["-i", str(audio_path)]
 
     cmd += [
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:v", "libx264",
+        "-preset", "slow",
+        "-crf", "23",
+        "-maxrate", "5M",
+        "-bufsize", "10M",
+        "-profile:v", "high",
         "-pix_fmt", "yuv420p",
     ]
 
     if audio_path and audio_path.exists():
-        cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+        cmd += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
 
     cmd += ["-movflags", "+faststart", str(output_path)]
 
