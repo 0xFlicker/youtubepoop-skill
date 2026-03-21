@@ -8,12 +8,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def fetch_giphy_gifs(searches, assets_dir, api_key, progress, step_key="giphy"):
-    """Fetch GIFs from GIPHY. Skips already-downloaded files."""
+    """Fetch GIFs from GIPHY. Skips already-downloaded files.
+
+    De-duplicates across queries by tracking GIPHY IDs — if a result was
+    already downloaded for a previous search, the next unique result from
+    the same query is used instead.
+    """
     assets_dir = Path(assets_dir)
 
     if progress.is_done(step_key):
         print(f"  [cached] GIPHY assets")
         return sorted(assets_dir.glob("giphy_*.gif"))
+
+    seen_ids = set()
 
     for i, query in enumerate(searches):
         for j in range(2):
@@ -23,13 +30,22 @@ def fetch_giphy_gifs(searches, assets_dir, api_key, progress, step_key="giphy"):
             print(f"  Fetching GIPHY: '{query}' [{j+1}/2]...")
             try:
                 r = requests.get("https://api.giphy.com/v1/gifs/search", params={
-                    "api_key": api_key, "q": query, "limit": 3, "rating": "pg-13",
+                    "api_key": api_key, "q": query, "limit": 10, "rating": "pg-13",
                 })
                 data = r.json().get("data", [])
-                if j < len(data):
-                    url = data[j]["images"]["fixed_width"]["url"]
+                # Pick the first result whose ID we haven't seen
+                picked = None
+                for item in data:
+                    if item["id"] not in seen_ids:
+                        picked = item
+                        seen_ids.add(item["id"])
+                        break
+                if picked:
+                    url = picked["images"]["fixed_width"]["url"]
                     img_data = requests.get(url).content
                     path.write_bytes(img_data)
+                else:
+                    print(f"    Warning: no unique results for '{query}'")
             except Exception as e:
                 print(f"    Warning: {e}")
 

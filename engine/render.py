@@ -166,7 +166,7 @@ def encode_video(frames_dir, audio_path, output_path, fps):
     cmd += [
         "-c:v", "libx264",
         "-preset", "slow",
-        "-crf", "23",
+        "-crf", "26",
         "-maxrate", "5M",
         "-bufsize", "10M",
         "-profile:v", "high",
